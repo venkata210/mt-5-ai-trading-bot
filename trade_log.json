@@ -1,2 +1,10 @@
-
-[]
+[
+    {
+        "action": "sell",
+        "symbol": "EURUSD",
+        "volume": 0.01,
+        "price": 1.04951,
+        "profit": 0,
+        "timestamp": "2024-12-13T23:27:28.665146"
+    }
+]

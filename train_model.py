@@ -6,6 +6,7 @@ import joblib
 from sklearn.ensemble import RandomForestClassifier
 import json
 import os
+import threading
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -95,7 +96,8 @@ def predict_signal(model, latest_data):
     prediction = model.predict(latest_data)
     return "buy" if prediction[0] else "sell"
 
-def log_trade(action, symbol, volume, price, profit):
+# Modify the log_trade function to handle profit later
+def log_trade(action, symbol, volume, price, profit=0):
     trade = {
         "action": action,
         "symbol": symbol,
@@ -197,9 +199,43 @@ def place_trade(action, symbol):
         handle_trade_error(result.retcode)
     else:
         logging.info(f"Trade successful: {result}")
-        # Calculate profit or loss
-        profit = result.profit
-        log_trade(action, symbol, LOTS, price, profit)
+        # Remove the invalid profit access
+        # profit = result.profit
+        log_trade(action, symbol, LOTS, price)
+        # Note: Profit will be logged when the trade is closed
+
+# Function to update trade profit when a trade is closed
+def update_trade_profit():
+    while True:
+        try:
+            closed_trades = mt5.history_deals_get()
+            if closed_trades is not None:
+                for deal in closed_trades:
+                    # Extract necessary details
+                    order_ticket = deal.order
+                    profit = deal.profit
+                    symbol = deal.symbol
+                    action = "buy" if deal.type == mt5.TRADE_ACTION_DEAL and deal.type_filling == mt5.ORDER_TYPE_BUY else "sell"
+
+                    # Find the corresponding trade in the log
+                    with open(TRADE_LOG_PATH, 'r+') as f:
+                        try:
+                            trades = json.load(f)
+                        except json.JSONDecodeError:
+                            trades = []
+                        for trade in trades:
+                            if trade["action"] == action and trade["symbol"] == symbol and trade["profit"] == 0:
+                                trade["profit"] = profit
+                                break
+                        f.seek(0)
+                        json.dump(trades, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error updating trade profit: {e}")
+        time.sleep(60)  # Check every minute
+
+# Start updating trade profits in a separate thread
+def start_profit_updater():
+    threading.Thread(target=update_trade_profit, daemon=True).start()
 
 # Handle specific trade errors
 def handle_trade_error(retcode):
@@ -230,6 +266,7 @@ def handle_trade_error(retcode):
 # Modify trading_bot to accept symbol
 def trading_bot(model, symbol):
     logging.info("Starting trading bot...")
+    start_profit_updater()
     while True:
         try:
             data = get_data(symbol, TIMEFRAME, LONG_MA_PERIOD + 1)

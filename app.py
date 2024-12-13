@@ -4,6 +4,8 @@ import threading
 from train_model import train_model, trading_bot, initialize_mt5, get_data  # Import get_data
 import json
 import os
+import pandas as pd
+import logging  # Ensure logging is imported
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # Replace with a strong secret key
