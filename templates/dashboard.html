@@ -1,14 +1,56 @@
-
 <!DOCTYPE html>
 <html>
 <head>
     <title>Trading Dashboard</title>
+    <!-- Include Chart.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <h2>Trading Dashboard</h2>
     <!-- Include graphs and stats here -->
     <div id="graphs">
-        <!-- Graphs will be rendered here -->
+        <canvas id="priceChart" width="800" height="400"></canvas>
     </div>
+
+    <script>
+        // Get the data passed from Flask
+        const dates = {{ dates | tojson }};
+        const closes = {{ closes | tojson }};
+
+        // Render the chart
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        const priceChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: dates,
+                datasets: [{
+                    label: 'Closing Price',
+                    data: closes,
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    borderWidth: 1,
+                    fill: true,
+                }]
+            },
+            options: {
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: 'Time'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: 'Price'
+                        }
+                    }
+                }
+            }
+        });
+    </script>
 </body>
 </html>

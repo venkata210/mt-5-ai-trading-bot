@@ -1,7 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, session
 import MetaTrader5 as mt5
 import threading
-from train_model import train_model, trading_bot, initialize_mt5
+from train_model import train_model, trading_bot, initialize_mt5, get_data  # Import get_data
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # Replace with a strong secret key
@@ -56,8 +56,22 @@ def start_trading_bot(symbol, account, password, server):
 
 @app.route('/dashboard')
 def dashboard():
-    # Render the dashboard with graphs and stats
-    return render_template('dashboard.html')
+    # Retrieve the selected symbol from the session
+    symbol = session.get('symbol')
+    if not symbol:
+        return redirect(url_for('select_currency'))
+    
+    try:
+        # Fetch historical data for the graph
+        data = get_data(symbol, mt5.TIMEFRAME_M1, 100)  # Fetch last 100 data points
+        dates = data['time'].dt.strftime('%Y-%m-%d %H:%M').tolist()
+        closes = data['close'].tolist()
+    except Exception as e:
+        logging.error(f"Error fetching data for dashboard: {e}")
+        dates = []
+        closes = []
+    
+    return render_template('dashboard.html', dates=dates, closes=closes)
 
 if __name__ == '__main__':
     app.run(debug=True)
