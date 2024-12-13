@@ -2,6 +2,8 @@ import MetaTrader5 as mt5
 import pandas as pd
 import time
 import logging
+import joblib
+from sklearn.ensemble import RandomForestClassifier
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,14 +22,37 @@ def initialize_mt5():
         raise Exception("MT5 initialization failed")
     
     account = 190331763  # Replace with your account number
-    password = "Karthik.413"  # Replace with your password
-    server = "Exness-MT5Trial14"  # Replace with your broker's server name
+    password = "Karthik.413"     # Replace with your password
+    server = "Exness-MT5Trial14"    # Replace with your broker's server name
 
     if not mt5.login(account, password, server):
         logging.error("Failed to login to MT5 account")
         raise Exception("MT5 login failed")
     else:
         logging.info(f"Successfully logged in to account {account}")
+        
+        # Check terminal trade permissions
+        terminal_info = mt5.terminal_info()
+        if terminal_info is None:
+            logging.error("Failed to get terminal info")
+            raise Exception("Failed to get terminal info")
+        else:
+            logging.info(f"Terminal Info - Trade Allowed: {terminal_info.trade_allowed}, Trade API Disabled: {terminal_info.tradeapi_disabled}")
+            if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
+                logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading' in the terminal.")
+                raise Exception("Trading not allowed by MetaTrader 5 terminal")
+        
+        # Retrieve symbol information to get volume constraints
+        symbol_info = mt5.symbol_info(SYMBOL)
+        if symbol_info is None:
+            logging.error(f"Symbol {SYMBOL} not found.")
+            raise Exception(f"Symbol {SYMBOL} not found.")
+        
+        global MIN_VOLUME, MAX_VOLUME, VOLUME_STEP
+        MIN_VOLUME = symbol_info.volume_min
+        MAX_VOLUME = symbol_info.volume_max
+        VOLUME_STEP = symbol_info.volume_step
+        logging.info(f"Volume constraints - Min: {MIN_VOLUME}, Max: {MAX_VOLUME}, Step: {VOLUME_STEP}")
 
 # Get historical data
 def get_data(symbol, timeframe, periods):
@@ -44,50 +69,140 @@ def get_data(symbol, timeframe, periods):
 def calculate_ma(data, period):
     return data['close'].rolling(window=period).mean()
 
+# Add data preparation for AI model
+def prepare_features(data):
+    data['short_ma'] = calculate_ma(data, SHORT_MA_PERIOD)
+    data['long_ma'] = calculate_ma(data, LONG_MA_PERIOD)
+    data['ma_diff'] = data['short_ma'] - data['long_ma']
+    data['target'] = data['close'].shift(-1) > data['close']
+    data = data.dropna()
+    return data[['ma_diff']], data['target']
+
+# Add model training function
+def train_model():
+    data = get_data(SYMBOL, TIMEFRAME, 1000)  # Increase periods for training
+    X, y = prepare_features(data)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X, y)
+    logging.info("Model trained.")
+    return model  # Return the trained model
+
+# Remove load_model function
+# def load_model():
+#     return joblib.load('trading_model.pkl')
+
+def predict_signal(model, latest_data):
+    # Ensure latest_data is a DataFrame with the same feature names as training
+    prediction = model.predict(latest_data)
+    return "buy" if prediction[0] else "sell"
+
 # Place a trade
 def place_trade(action):
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if tick is None:
+        logging.error(f"Failed to get tick info for symbol {SYMBOL}")
+        return
+
+    price = tick.ask if action == "buy" else tick.bid
+    if price == 0:
+        logging.error(f"Invalid price for action {action}")
+        return
+
+    # Pre-trade validation
+    if not mt5.symbol_select(SYMBOL, True):
+        logging.error(f"Symbol {SYMBOL} not selected")
+        return
+
+    symbol_info = mt5.symbol_info(SYMBOL)
+    if symbol_info is None:
+        logging.error(f"Failed to retrieve symbol info for {SYMBOL}")
+        return
+
+    point = symbol_info.point
+    if point == 0:
+        logging.error(f"Invalid point size for symbol {SYMBOL}")
+        return
+
+    # Validate and adjust LOTS
+    global LOTS
+    # Adjust LOTS to the nearest valid step
+    LOTS = MIN_VOLUME  # Test with minimum volume
+    LOTS = max(MIN_VOLUME, min(LOTS, MAX_VOLUME))
+    LOTS = round(round(LOTS / VOLUME_STEP) * VOLUME_STEP, 2)
+
+    # Simplify trade request
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": SYMBOL,
         "volume": LOTS,
         "type": mt5.ORDER_TYPE_BUY if action == "buy" else mt5.ORDER_TYPE_SELL,
-        "price": mt5.symbol_info_tick(SYMBOL).ask if action == "buy" else mt5.symbol_info_tick(SYMBOL).bid,
+        "price": price,
         "deviation": 20,
         "magic": 123456,
         "comment": "Python MT5 Bot",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
+        # 'type_time': mt5.ORDER_TIME_GTC,  # Optional
+        # 'type_filling': mt5.ORDER_FILLING_IOC,  # Set below based on allowed modes
     }
+
+    # Check allowed filling modes
+    filling_mode = symbol_info.filling_mode
+    if filling_mode & mt5.ORDER_FILLING_FOK:
+        request['type_filling'] = mt5.ORDER_FILLING_FOK
+    elif filling_mode & mt5.ORDER_FILLING_IOC:
+        request['type_filling'] = mt5.ORDER_FILLING_IOC
+    else:
+        logging.error("No acceptable filling mode available for this symbol.")
+        return
+
+    logging.info(f"Placing trade: {request}")
+
     result = mt5.order_send(request)
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logging.error(f"Trade failed, retcode: {result.retcode}")
+        logging.error(f"Trade result: {result}")
+        last_error = mt5.last_error()
+        logging.error(f"MT5 last error: {last_error}")
+        handle_trade_error(result.retcode)
     else:
         logging.info(f"Trade successful: {result}")
 
-# Main trading logic
-def trading_bot():
+# Handle specific trade errors
+def handle_trade_error(retcode):
+    error_messages = {
+        mt5.TRADE_RETCODE_REQUOTE: "Requote",
+        mt5.TRADE_RETCODE_REJECT: "Request rejected",
+        mt5.TRADE_RETCODE_CANCEL: "Request canceled by trader",
+        mt5.TRADE_RETCODE_PLACED: "Order placed",
+        mt5.TRADE_RETCODE_DONE: "Deal executed",
+        mt5.TRADE_RETCODE_DONE_PARTIAL: "Partial deal executed",
+        mt5.TRADE_RETCODE_ERROR: "Generic error",
+        mt5.TRADE_RETCODE_TIMEOUT: "Request timeout",
+        mt5.TRADE_RETCODE_INVALID: "Invalid request",
+        mt5.TRADE_RETCODE_INVALID_VOLUME: "Invalid volume",
+        mt5.TRADE_RETCODE_INVALID_PRICE: "Invalid price",
+        mt5.TRADE_RETCODE_INVALID_STOPS: "Invalid stops",
+        mt5.TRADE_RETCODE_MARKET_CLOSED: "Market closed",
+        mt5.TRADE_RETCODE_NO_MONEY: "Not enough money",
+        mt5.TRADE_RETCODE_PRICE_CHANGED: "Price changed",
+        mt5.TRADE_RETCODE_PRICE_OFF: "No quotes",
+        mt5.TRADE_RETCODE_INVALID_FILL: "Invalid order filling type",
+        mt5.TRADE_RETCODE_INVALID_ORDER: "Invalid order",
+        # Add more retcode mappings as needed
+    }
+    message = error_messages.get(retcode, "Unknown error")
+    logging.error(f"Trade error {retcode}: {message}")
+
+# Modify trading logic to use AI predictions
+def trading_bot(model):
     logging.info("Starting trading bot...")
     while True:
         try:
             data = get_data(SYMBOL, TIMEFRAME, LONG_MA_PERIOD + 1)
-            data['short_ma'] = calculate_ma(data, SHORT_MA_PERIOD)
-            data['long_ma'] = calculate_ma(data, LONG_MA_PERIOD)
+            features, _ = prepare_features(data)
+            latest_features = features.iloc[-1:].reset_index(drop=True)  # Ensure it's a DataFrame
+            action = predict_signal(model, latest_features)
 
-            if len(data) < LONG_MA_PERIOD:
-                logging.info("Not enough data for analysis, waiting 60 seconds...")
-                time.sleep(60)
-                continue
-
-            last_row = data.iloc[-1]
-            prev_row = data.iloc[-2]
-
-            # Buy signal
-            if prev_row['short_ma'] <= prev_row['long_ma'] and last_row['short_ma'] > last_row['long_ma']:
-                place_trade("buy")
-
-            # Sell signal
-            elif prev_row['short_ma'] >= prev_row['long_ma'] and last_row['short_ma'] < last_row['long_ma']:
-                place_trade("sell")
+            place_trade(action)
 
         except Exception as e:
             logging.error(f"Error in trading logic: {e}")
@@ -98,7 +213,8 @@ def trading_bot():
 if __name__ == "__main__":
     try:
         initialize_mt5()
-        trading_bot()
+        model = train_model()  # Train the model and keep it in memory
+        trading_bot(model)     # Pass the trained model to the trading bot
     except KeyboardInterrupt:
         logging.info("Stopping trading bot...")
     except Exception as e:
