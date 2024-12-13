@@ -2,9 +2,53 @@ from flask import Flask, render_template, request, redirect, url_for, session
 import MetaTrader5 as mt5
 import threading
 from train_model import train_model, trading_bot, initialize_mt5, get_data  # Import get_data
+import json
+import os
 
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # Replace with a strong secret key
+
+# Ensure 'static' folder is correctly set up for serving static files
+app.static_folder = 'static'
+
+# Path to the trade log file
+TRADE_LOG_PATH = 'trade_log.json'
+
+def get_trade_summary():
+    if not os.path.exists(TRADE_LOG_PATH):
+        return {
+            "total_profit": 0,
+            "total_trades": 0,
+            "trade_actions": {},
+            "profits_over_time": [],
+            "trade_dates": []
+        }
+    
+    with open(TRADE_LOG_PATH, 'r') as f:
+        try:
+            trades = json.load(f)
+        except json.JSONDecodeError:
+            trades = []
+    
+    total_profit = sum(trade['profit'] for trade in trades)
+    total_trades = len(trades)
+    
+    trade_actions = {}
+    for trade in trades:
+        action = trade['action']
+        trade_actions[action] = trade_actions.get(action, 0) + 1
+    
+    # Prepare data for profit over time
+    profits_over_time = [trade['profit'] for trade in trades]
+    trade_dates = [pd.to_datetime(trade['timestamp']).strftime('%Y-%m-%d %H:%M') for trade in trades]
+    
+    return {
+        "total_profit": total_profit,
+        "total_trades": total_trades,
+        "trade_actions": trade_actions,
+        "profits_over_time": profits_over_time,
+        "trade_dates": trade_dates
+    }
 
 @app.route('/', methods=['GET', 'POST'])
 def login():
@@ -71,7 +115,18 @@ def dashboard():
         dates = []
         closes = []
     
-    return render_template('dashboard.html', dates=dates, closes=closes)
+    trade_summary = get_trade_summary()
+    
+    return render_template(
+        'dashboard.html', 
+        dates=dates, 
+        closes=closes, 
+        total_profit=trade_summary["total_profit"],
+        total_trades=trade_summary["total_trades"],
+        trade_actions=trade_summary["trade_actions"],
+        trade_dates=trade_summary["trade_dates"],
+        profits_over_time=trade_summary["profits_over_time"]
+    )
 
 if __name__ == '__main__':
     app.run(debug=True)

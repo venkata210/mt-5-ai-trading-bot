@@ -4,6 +4,8 @@ import time
 import logging
 import joblib
 from sklearn.ensemble import RandomForestClassifier
+import json
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -14,6 +16,7 @@ TIMEFRAME = mt5.TIMEFRAME_M1  # 1-minute timeframe
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
 LOTS = 0.1
+TRADE_LOG_PATH = 'trade_log.json'
 
 # Initialize MT5 connection with parameters
 def initialize_mt5(account, password, server):
@@ -91,6 +94,28 @@ def predict_signal(model, latest_data):
     # Ensure latest_data is a DataFrame with the same feature names as training
     prediction = model.predict(latest_data)
     return "buy" if prediction[0] else "sell"
+
+def log_trade(action, symbol, volume, price, profit):
+    trade = {
+        "action": action,
+        "symbol": symbol,
+        "volume": volume,
+        "price": price,
+        "profit": profit,
+        "timestamp": pd.Timestamp.now().isoformat()
+    }
+    if not os.path.exists(TRADE_LOG_PATH):
+        with open(TRADE_LOG_PATH, 'w') as f:
+            json.dump([trade], f, indent=4)
+    else:
+        with open(TRADE_LOG_PATH, 'r+') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = []
+            data.append(trade)
+            f.seek(0)
+            json.dump(data, f, indent=4)
 
 # Modify place_trade to accept symbol
 def place_trade(action, symbol):
@@ -172,6 +197,9 @@ def place_trade(action, symbol):
         handle_trade_error(result.retcode)
     else:
         logging.info(f"Trade successful: {result}")
+        # Calculate profit or loss
+        profit = result.profit
+        log_trade(action, symbol, LOTS, price, profit)
 
 # Handle specific trade errors
 def handle_trade_error(retcode):

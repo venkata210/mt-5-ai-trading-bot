@@ -1,56 +1,166 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Trading Dashboard</title>
-    <!-- Include Chart.js from CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <h2>Trading Dashboard</h2>
-    <!-- Include graphs and stats here -->
-    <div id="graphs">
-        <canvas id="priceChart" width="800" height="400"></canvas>
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h2 class="mb-4">Trading Dashboard</h2>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card text-white bg-success mb-3">
+            <div class="card-header">Total Profit</div>
+            <div class="card-body">
+                <h5 class="card-title">${{ total_profit }}</h5>
+            </div>
+        </div>
     </div>
+    <div class="col-md-6">
+        <div class="card text-white bg-danger mb-3">
+            <div class="card-header">Total Trades</div>
+            <div class="card-body">
+                <h5 class="card-title">{{ total_trades }}</h5>
+            </div>
+        </div>
+    </div>
+</div>
 
-    <script>
-        // Get the data passed from Flask
-        const dates = {{ dates | tojson }};
-        const closes = {{ closes | tojson }};
+<div class="row mb-4">
+    <div class="col-md-6">
+        <canvas id="tradeActionsChart" width="400" height="400"></canvas>
+    </div>
+    <div class="col-md-6">
+        <canvas id="profitOverTimeChart" width="400" height="400"></canvas>
+    </div>
+</div>
 
-        // Render the chart
-        const ctx = document.getElementById('priceChart').getContext('2d');
-        const priceChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: dates,
-                datasets: [{
-                    label: 'Closing Price',
-                    data: closes,
-                    borderColor: 'rgba(75, 192, 192, 1)',
-                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                    borderWidth: 1,
-                    fill: true,
-                }]
-            },
-            options: {
-                scales: {
-                    x: {
-                        display: true,
-                        title: {
-                            display: true,
-                            text: 'Time'
-                        }
+<div class="mb-4">
+    <canvas id="priceChart" width="800" height="400"></canvas>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+    // Existing Price Chart
+    const dates = {{ dates | tojson | safe }};
+    const closes = {{ closes | tojson | safe }};
+
+    const ctxPrice = document.getElementById('priceChart').getContext('2d');
+    const priceChart = new Chart(ctxPrice, {
+        type: 'line',
+        data: {
+            labels: dates,
+            datasets: [{
+                label: 'Closing Price',
+                data: closes,
+                borderColor: 'rgba(75, 192, 192, 1)',
+                backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                borderWidth: 1,
+                fill: true,
+            }]
+        },
+        options: {
+            scales: {
+                x: {
+                    type: 'timeseries',
+                    time: {
+                        unit: 'minute'
                     },
-                    y: {
+                    title: {
                         display: true,
-                        title: {
-                            display: true,
-                            text: 'Price'
-                        }
+                        text: 'Time'
+                    }
+                },
+                y: {
+                    title: {
+                        display: true,
+                        text: 'Price'
                     }
                 }
+            },
+            responsive: true,
+        }
+    });
+
+    // New Trade Actions Chart (Pie Chart)
+    const tradeActions = {{ trade_actions | tojson | safe }};
+    const tradeActionLabels = Object.keys(tradeActions);
+    const tradeActionData = Object.values(tradeActions);
+
+    const ctxTradeActions = document.getElementById('tradeActionsChart').getContext('2d');
+    const tradeActionsChart = new Chart(ctxTradeActions, {
+        type: 'pie',
+        data: {
+            labels: tradeActionLabels,
+            datasets: [{
+                label: 'Trade Actions',
+                data: tradeActionData,
+                backgroundColor: [
+                    'rgba(54, 162, 235, 0.6)',
+                    'rgba(255, 99, 132, 0.6)',
+                    'rgba(255, 206, 86, 0.6)',
+                    // Add more colors if needed
+                ],
+                borderColor: [
+                    'rgba(54, 162, 235, 1)',
+                    'rgba(255,99,132,1)',
+                    'rgba(255, 206, 86, 1)',
+                    // Add more border colors if needed
+                ],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Trade Actions Distribution'
+                }
             }
-        });
-    </script>
-</body>
-</html>
+        }
+    });
+
+    // New Profit Over Time Chart (Bar Chart)
+    const tradeDates = {{ trade_dates | tojson | safe }};
+    const profitsOverTime = {{ profits_over_time | tojson | safe }};
+
+    const ctxProfit = document.getElementById('profitOverTimeChart').getContext('2d');
+    const profitOverTimeChart = new Chart(ctxProfit, {
+        type: 'bar',
+        data: {
+            labels: tradeDates,
+            datasets: [{
+                label: 'Profit/Loss',
+                data: profitsOverTime,
+                backgroundColor: profitsOverTime.map(p => p >= 0 ? 'rgba(75, 192, 192, 0.6)' : 'rgba(255, 99, 132, 0.6)'),
+                borderColor: profitsOverTime.map(p => p >= 0 ? 'rgba(75, 192, 192, 1)' : 'rgba(255, 99, 132, 1)'),
+                borderWidth: 1
+            }]
+        },
+        options: {
+            scales: {
+                x: {
+                    type: 'timeseries',
+                    time: {
+                        unit: 'minute'
+                    },
+                    title: {
+                        display: true,
+                        text: 'Time'
+                    }
+                },
+                y: {
+                    title: {
+                        display: true,
+                        text: 'Profit/Loss'
+                    }
+                }
+            },
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Profit/Loss Over Time'
+                }
+            }
+        }
+    });
+</script>
+{% endblock %}
