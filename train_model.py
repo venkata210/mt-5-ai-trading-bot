@@ -130,6 +130,15 @@ def place_trade(action):
     LOTS = max(MIN_VOLUME, min(LOTS, MAX_VOLUME))
     LOTS = round(round(LOTS / VOLUME_STEP) * VOLUME_STEP, 2)
 
+    # Define SL and TP distances in points (pip_distance * point size)
+    pip_distance = 50
+    if action == "buy":
+        sl = price - pip_distance * point
+        tp = price + pip_distance * point
+    else:
+        sl = price + pip_distance * point
+        tp = price - pip_distance * point
+
     # Simplify trade request
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -137,6 +146,8 @@ def place_trade(action):
         "volume": LOTS,
         "type": mt5.ORDER_TYPE_BUY if action == "buy" else mt5.ORDER_TYPE_SELL,
         "price": price,
+        "sl": sl,
+        "tp": tp,
         "deviation": 20,
         "magic": 123456,
         "comment": "Python MT5 Bot",
