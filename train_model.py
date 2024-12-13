@@ -15,22 +15,18 @@ SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
 LOTS = 0.1
 
-# Initialize MT5 connection
-def initialize_mt5():
+# Initialize MT5 connection with parameters
+def initialize_mt5(account, password, server):
     if not mt5.initialize():
         logging.error("Failed to initialize MT5")
         raise Exception("MT5 initialization failed")
-    
-    account = 190331763  # Replace with your account number
-    password = "Karthik.413"     # Replace with your password
-    server = "Exness-MT5Trial14"    # Replace with your broker's server name
 
-    if not mt5.login(account, password, server):
+    if not mt5.login(int(account), password, server):
         logging.error("Failed to login to MT5 account")
         raise Exception("MT5 login failed")
     else:
         logging.info(f"Successfully logged in to account {account}")
-        
+
         # Check terminal trade permissions
         terminal_info = mt5.terminal_info()
         if terminal_info is None:
@@ -41,13 +37,13 @@ def initialize_mt5():
             if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
                 logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading' in the terminal.")
                 raise Exception("Trading not allowed by MetaTrader 5 terminal")
-        
+
         # Retrieve symbol information to get volume constraints
         symbol_info = mt5.symbol_info(SYMBOL)
         if symbol_info is None:
             logging.error(f"Symbol {SYMBOL} not found.")
             raise Exception(f"Symbol {SYMBOL} not found.")
-        
+
         global MIN_VOLUME, MAX_VOLUME, VOLUME_STEP
         MIN_VOLUME = symbol_info.volume_min
         MAX_VOLUME = symbol_info.volume_max
@@ -56,6 +52,10 @@ def initialize_mt5():
 
 # Get historical data
 def get_data(symbol, timeframe, periods):
+    # Ensure the symbol is selected in MetaTrader5
+    if not mt5.symbol_select(symbol, True):
+        logging.error(f"Symbol {symbol} not found or could not be selected.")
+        raise Exception(f"Symbol {symbol} not found or could not be selected.")
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, periods)
     if rates is None or len(rates) == 0:
         logging.warning(f"No data received for symbol {symbol}")
@@ -78,29 +78,25 @@ def prepare_features(data):
     data = data.dropna()
     return data[['ma_diff']], data['target']
 
-# Add model training function
-def train_model():
-    data = get_data(SYMBOL, TIMEFRAME, 1000)  # Increase periods for training
+# Modify train_model to accept symbol
+def train_model(symbol):
+    data = get_data(symbol, TIMEFRAME, 1000)  # Use the selected symbol
     X, y = prepare_features(data)
     model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X, y)
     logging.info("Model trained.")
-    return model  # Return the trained model
-
-# Remove load_model function
-# def load_model():
-#     return joblib.load('trading_model.pkl')
+    return model
 
 def predict_signal(model, latest_data):
     # Ensure latest_data is a DataFrame with the same feature names as training
     prediction = model.predict(latest_data)
     return "buy" if prediction[0] else "sell"
 
-# Place a trade
-def place_trade(action):
-    tick = mt5.symbol_info_tick(SYMBOL)
+# Modify place_trade to accept symbol
+def place_trade(action, symbol):
+    tick = mt5.symbol_info_tick(symbol)
     if tick is None:
-        logging.error(f"Failed to get tick info for symbol {SYMBOL}")
+        logging.error(f"Failed to get tick info for symbol {symbol}")
         return
 
     price = tick.ask if action == "buy" else tick.bid
@@ -109,18 +105,18 @@ def place_trade(action):
         return
 
     # Pre-trade validation
-    if not mt5.symbol_select(SYMBOL, True):
-        logging.error(f"Symbol {SYMBOL} not selected")
+    if not mt5.symbol_select(symbol, True):
+        logging.error(f"Symbol {symbol} not selected")
         return
 
-    symbol_info = mt5.symbol_info(SYMBOL)
+    symbol_info = mt5.symbol_info(symbol)
     if symbol_info is None:
-        logging.error(f"Failed to retrieve symbol info for {SYMBOL}")
+        logging.error(f"Failed to retrieve symbol info for {symbol}")
         return
 
     point = symbol_info.point
     if point == 0:
-        logging.error(f"Invalid point size for symbol {SYMBOL}")
+        logging.error(f"Invalid point size for symbol {symbol}")
         return
 
     # Validate and adjust LOTS
@@ -142,7 +138,7 @@ def place_trade(action):
     # Simplify trade request
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "volume": LOTS,
         "type": mt5.ORDER_TYPE_BUY if action == "buy" else mt5.ORDER_TYPE_SELL,
         "price": price,
@@ -203,17 +199,17 @@ def handle_trade_error(retcode):
     message = error_messages.get(retcode, "Unknown error")
     logging.error(f"Trade error {retcode}: {message}")
 
-# Modify trading logic to use AI predictions
-def trading_bot(model):
+# Modify trading_bot to accept symbol
+def trading_bot(model, symbol):
     logging.info("Starting trading bot...")
     while True:
         try:
-            data = get_data(SYMBOL, TIMEFRAME, LONG_MA_PERIOD + 1)
+            data = get_data(symbol, TIMEFRAME, LONG_MA_PERIOD + 1)
             features, _ = prepare_features(data)
-            latest_features = features.iloc[-1:].reset_index(drop=True)  # Ensure it's a DataFrame
+            latest_features = features.iloc[-1:].reset_index(drop=True)
             action = predict_signal(model, latest_features)
 
-            place_trade(action)
+            place_trade(action, symbol)
 
         except Exception as e:
             logging.error(f"Error in trading logic: {e}")
@@ -223,9 +219,12 @@ def trading_bot(model):
 # Run the bot
 if __name__ == "__main__":
     try:
-        initialize_mt5()
-        model = train_model()  # Train the model and keep it in memory
-        trading_bot(model)     # Pass the trained model to the trading bot
+        account = 190331763  # Replace with your account number
+        password = "Karthik.413"     # Replace with your password
+        server = "Exness-MT5Trial14"    # Replace with your broker's server name
+        initialize_mt5(account, password, server)
+        model = train_model(SYMBOL)  # Train the model and keep it in memory
+        trading_bot(model, SYMBOL)     # Pass the trained model to the trading bot
     except KeyboardInterrupt:
         logging.info("Stopping trading bot...")
     except Exception as e:
