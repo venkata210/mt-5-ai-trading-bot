@@ -1,15 +1,21 @@
 /* Custom styles */
 
 body {
-    background-color: #f8f9fa;
+    background-color: #f0f2f5;
+    font-family: 'Segoe UI', sans-serif;
 }
 
 h2 {
     margin-top: 20px;
 }
 
+.navbar {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
 .navbar-brand {
-    font-weight: bold;
+    font-size: 1.5rem;
+    font-weight: 600;
 }
 
 .container {
@@ -17,7 +23,22 @@ h2 {
 }
 
 /* Additional styles for dashboard cards */
+.card {
+    border: none;
+    border-radius: 10px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+}
+
 .card-header {
+    border-radius: 10px 10px 0 0 !important;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
     font-size: 1.2rem;
     text-align: center;
 }
@@ -25,4 +46,60 @@ h2 {
 .card-title {
     font-size: 2rem;
     text-align: center;
+}
+
+.form-control {
+    border-radius: 8px;
+    border: 1px solid #ced4da;
+    padding: 0.75rem;
+}
+
+.form-control:focus {
+    box-shadow: 0 0 0 0.2rem rgba(0,123,255,0.25);
+}
+
+.btn {
+    border-radius: 8px;
+    padding: 0.75rem 1.5rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    transition: all 0.2s;
+}
+
+.btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+/* Dashboard specific styles */
+.dashboard-card {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    margin-bottom: 20px;
+}
+
+canvas {
+    border-radius: 10px;
+    background: white;
+    padding: 15px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+}
+
+/* Status indicators */
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+
+.status-active {
+    background-color: #28a745;
+}
+
+.status-inactive {
+    background-color: #dc3545;
 }

@@ -1,163 +1,208 @@
 {% extends "base.html" %}
-{% block title %}Dashboard{% endblock %}
+{% block title %}Trading Dashboard{% endblock %}
 {% block content %}
-<h2 class="mb-4">Trading Dashboard</h2>
-
-<div class="row mb-4">
-    <div class="col-md-6">
-        <div class="card text-white bg-success mb-3">
-            <div class="card-header">Total Profit</div>
-            <div class="card-body">
-                <h5 class="card-title">${{ total_profit }}</h5>
+<div class="dashboard-container">
+    <!-- Trading Status Card -->
+    <div class="row mb-4">
+        <div class="col-md-12">
+            <div class="card shadow">
+                <div class="card-header bg-dark text-white">
+                    <i class="fas fa-robot me-2"></i>Trading Bot Status
+                </div>
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <h5>Current Symbol: <span class="badge bg-primary">{{ symbol }}</span></h5>
+                            <p class="mb-0">
+                                Status: 
+                                <span class="badge {% if is_trading %}bg-success{% else %}bg-danger{% endif %}">
+                                    {{ "Active" if is_trading else "Inactive" }}
+                                </span>
+                            </p>
+                        </div>
+                        <div class="text-end">
+                            <h5>Balance: <span class="text-primary">${{ account_balance|round(2) }}</span></h5>
+                            <p class="mb-0">Equity: ${{ account_equity|round(2) }}</p>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-    <div class="col-md-6">
-        <div class="card text-white bg-danger mb-3">
-            <div class="card-header">Total Trades</div>
-            <div class="card-body">
-                <h5 class="card-title">{{ total_trades }}</h5>
+
+    <!-- Performance Metrics -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card shadow">
+                <div class="card-header bg-success text-white">
+                    <i class="fas fa-chart-line me-2"></i>Total Profit
+                </div>
+                <div class="card-body text-center">
+                    <h3 class="mb-0">${{ total_profit|round(2) }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow">
+                <div class="card-header bg-info text-white">
+                    <i class="fas fa-exchange-alt me-2"></i>Total Trades
+                </div>
+                <div class="card-body text-center">
+                    <h3 class="mb-0">{{ total_trades }}</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow">
+                <div class="card-header bg-warning text-white">
+                    <i class="fas fa-percentage me-2"></i>Win Rate
+                </div>
+                <div class="card-body text-center">
+                    <h3 class="mb-0">{{ win_rate|round(1) }}%</h3>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow">
+                <div class="card-header bg-primary text-white">
+                    <i class="fas fa-clock me-2"></i>Active Time
+                </div>
+                <div class="card-body text-center">
+                    <h3 class="mb-0">{{ active_time }}</h3>
+                </div>
             </div>
         </div>
     </div>
-</div>
 
-<div class="row mb-4">
-    <div class="col-md-6">
-        <canvas id="tradeActionsChart" width="400" height="400"></canvas>
+    <!-- Charts Row -->
+    <div class="row mb-4">
+        <div class="col-md-8">
+            <div class="card shadow">
+                <div class="card-header bg-dark text-white">
+                    <i class="fas fa-chart-area me-2"></i>Price Chart
+                </div>
+                <div class="card-body">
+                    <canvas id="priceChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card shadow">
+                <div class="card-header bg-dark text-white">
+                    <i class="fas fa-chart-pie me-2"></i>Trade Distribution
+                </div>
+                <div class="card-body">
+                    <canvas id="tradeActionsChart"></canvas>
+                </div>
+            </div>
+        </div>
     </div>
-    <div class="col-md-6">
-        <canvas id="profitOverTimeChart" width="400" height="400"></canvas>
-    </div>
-</div>
 
-<div class="mb-4">
-    <canvas id="priceChart" width="800" height="400"></canvas>
+    <!-- Trade History and Performance -->
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card shadow">
+                <div class="card-header bg-dark text-white">
+                    <i class="fas fa-history me-2"></i>Recent Trades
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Action</th>
+                                    <th>Symbol</th>
+                                    <th>Price</th>
+                                    <th>Volume</th>
+                                    <th>Profit</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for trade in recent_trades %}
+                                <tr class="{% if trade.profit > 0 %}table-success{% elif trade.profit < 0 %}table-danger{% endif %}">
+                                    <td>{{ trade.timestamp }}</td>
+                                    <td>{{ trade.action }}</td>
+                                    <td>{{ trade.symbol }}</td>
+                                    <td>${{ trade.price|round(5) }}</td>
+                                    <td>{{ trade.volume }}</td>
+                                    <td>${{ trade.profit|round(2) }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-    // Existing Price Chart
-    const dates = {{ dates | tojson | safe }};
-    const closes = {{ closes | tojson | safe }};
-
-    const ctxPrice = document.getElementById('priceChart').getContext('2d');
-    const priceChart = new Chart(ctxPrice, {
+    // Price Chart
+    const priceCtx = document.getElementById('priceChart').getContext('2d');
+    new Chart(priceCtx, {
         type: 'line',
         data: {
-            labels: dates,
+            labels: {{ dates|tojson|safe }},
             datasets: [{
-                label: 'Closing Price',
-                data: closes,
-                borderColor: 'rgba(75, 192, 192, 1)',
-                backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                borderWidth: 1,
-                fill: true,
+                label: 'Price',
+                data: {{ closes|tojson|safe }},
+                borderColor: 'rgb(75, 192, 192)',
+                tension: 0.1
             }]
         },
         options: {
+            responsive: true,
+            plugins: {
+                title: {
+                    display: true,
+                    text: 'Price Movement'
+                }
+            },
+            interaction: {
+                intersect: false,
+            },
             scales: {
                 x: {
-                    type: 'timeseries',
-                    time: {
-                        unit: 'minute'
-                    },
+                    display: true,
                     title: {
                         display: true,
                         text: 'Time'
                     }
                 },
                 y: {
+                    display: true,
                     title: {
                         display: true,
                         text: 'Price'
                     }
                 }
-            },
-            responsive: true,
-        }
-    });
-
-    // New Trade Actions Chart (Pie Chart)
-    const tradeActions = {{ trade_actions | tojson | safe }};
-    const tradeActionLabels = Object.keys(tradeActions);
-    const tradeActionData = Object.values(tradeActions);
-
-    const ctxTradeActions = document.getElementById('tradeActionsChart').getContext('2d');
-    const tradeActionsChart = new Chart(ctxTradeActions, {
-        type: 'pie',
-        data: {
-            labels: tradeActionLabels,
-            datasets: [{
-                label: 'Trade Actions',
-                data: tradeActionData,
-                backgroundColor: [
-                    'rgba(54, 162, 235, 0.6)',
-                    'rgba(255, 99, 132, 0.6)',
-                    'rgba(255, 206, 86, 0.6)',
-                    // Add more colors if needed
-                ],
-                borderColor: [
-                    'rgba(54, 162, 235, 1)',
-                    'rgba(255,99,132,1)',
-                    'rgba(255, 206, 86, 1)',
-                    // Add more border colors if needed
-                ],
-                borderWidth: 1
-            }]
-        },
-        options: {
-            responsive: true,
-            plugins: {
-                title: {
-                    display: true,
-                    text: 'Trade Actions Distribution'
-                }
             }
         }
     });
 
-    // New Profit Over Time Chart (Bar Chart)
-    const tradeDates = {{ trade_dates | tojson | safe }};
-    const profitsOverTime = {{ profits_over_time | tojson | safe }};
-
-    const ctxProfit = document.getElementById('profitOverTimeChart').getContext('2d');
-    const profitOverTimeChart = new Chart(ctxProfit, {
-        type: 'bar',
+    // Trade Distribution Chart
+    const distributionCtx = document.getElementById('tradeActionsChart').getContext('2d');
+    new Chart(distributionCtx, {
+        type: 'doughnut',
         data: {
-            labels: tradeDates,
+            labels: Object.keys({{ trade_actions|tojson|safe }}),
             datasets: [{
-                label: 'Profit/Loss',
-                data: profitsOverTime,
-                backgroundColor: profitsOverTime.map(p => p >= 0 ? 'rgba(75, 192, 192, 0.6)' : 'rgba(255, 99, 132, 0.6)'),
-                borderColor: profitsOverTime.map(p => p >= 0 ? 'rgba(75, 192, 192, 1)' : 'rgba(255, 99, 132, 1)'),
-                borderWidth: 1
+                data: Object.values({{ trade_actions|tojson|safe }}),
+                backgroundColor: [
+                    'rgb(75, 192, 192)',
+                    'rgb(255, 99, 132)',
+                    'rgb(255, 205, 86)'
+                ]
             }]
         },
         options: {
-            scales: {
-                x: {
-                    type: 'timeseries',
-                    time: {
-                        unit: 'minute'
-                    },
-                    title: {
-                        display: true,
-                        text: 'Time'
-                    }
-                },
-                y: {
-                    title: {
-                        display: true,
-                        text: 'Profit/Loss'
-                    }
-                }
-            },
             responsive: true,
             plugins: {
-                title: {
-                    display: true,
-                    text: 'Profit/Loss Over Time'
+                legend: {
+                    position: 'bottom',
                 }
             }
         }

@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 import json
 import os
 import threading
+import numpy as np
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -73,14 +74,37 @@ def get_data(symbol, timeframe, periods):
 def calculate_ma(data, period):
     return data['close'].rolling(window=period).mean()
 
+# New function to calculate technical indicators
+def calculate_indicators(data):
+    # RSI calculation
+    delta = data['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['rsi'] = 100 - (100 / (1 + rs))
+
+    # ATR calculation
+    high_low = data['high'] - data['low']
+    high_close = np.abs(data['high'] - data['close'].shift())
+    low_close = np.abs(data['low'] - data['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    data['atr'] = true_range.rolling(14).mean()
+
+    # Momentum
+    data['momentum'] = data['close'] - data['close'].shift(10)
+
+    return data
+
 # Add data preparation for AI model
 def prepare_features(data):
     data['short_ma'] = calculate_ma(data, SHORT_MA_PERIOD)
     data['long_ma'] = calculate_ma(data, LONG_MA_PERIOD)
     data['ma_diff'] = data['short_ma'] - data['long_ma']
+    data = calculate_indicators(data)
     data['target'] = data['close'].shift(-1) > data['close']
     data = data.dropna()
-    return data[['ma_diff']], data['target']
+    return data[['ma_diff', 'rsi', 'atr', 'momentum']], data['target']
 
 # Modify train_model to accept symbol
 def train_model(symbol):
@@ -91,10 +115,25 @@ def train_model(symbol):
     logging.info("Model trained.")
     return model
 
+# Update predict_signal function
 def predict_signal(model, latest_data):
-    # Ensure latest_data is a DataFrame with the same feature names as training
     prediction = model.predict(latest_data)
-    return "buy" if prediction[0] else "sell"
+    proba = model.predict_proba(latest_data)[0]
+    
+    # Get the actual values for validation
+    rsi = latest_data['rsi'].iloc[0]
+    momentum = latest_data['momentum'].iloc[0]
+    ma_diff = latest_data['ma_diff'].iloc[0]
+
+    # Enhanced trading rules
+    if prediction[0]:  # Model predicts up
+        if rsi < 30 and momentum > 0 and ma_diff > 0:
+            return "buy"
+    else:  # Model predicts down
+        if rsi > 70 and momentum < 0 and ma_diff < 0:
+            return "sell"
+    
+    return "hold"  # Default to hold if conditions aren't met
 
 # Modify the log_trade function to handle profit later
 def log_trade(action, symbol, volume, price, profit=0):
@@ -119,8 +158,33 @@ def log_trade(action, symbol, volume, price, profit=0):
             f.seek(0)
             json.dump(data, f, indent=4)
 
-# Modify place_trade to accept symbol
+# Update place_trade function to include position sizing
 def place_trade(action, symbol):
+    if action == "hold":
+        return
+
+    # Get account info for position sizing
+    account_info = mt5.account_info()
+    if account_info is None:
+        logging.error("Failed to get account info")
+        return
+
+    # Calculate position size based on risk percentage (1% risk per trade)
+    risk_percent = 0.01
+    account_balance = account_info.balance
+    pip_value = mt5.symbol_info(symbol).point * 10
+    risk_amount = account_balance * risk_percent
+    
+    # Calculate position size based on 50 pip stop loss
+    position_size = risk_amount / (50 * pip_value)
+    
+    # Adjust to symbol's volume constraints
+    position_size = max(MIN_VOLUME, min(position_size, MAX_VOLUME))
+    position_size = round(round(position_size / VOLUME_STEP) * VOLUME_STEP, 2)
+    
+    global LOTS
+    LOTS = position_size
+
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
         logging.error(f"Failed to get tick info for symbol {symbol}")
@@ -146,10 +210,7 @@ def place_trade(action, symbol):
         logging.error(f"Invalid point size for symbol {symbol}")
         return
 
-    # Validate and adjust LOTS
-    global LOTS
-    # Adjust LOTS to the nearest valid step
-    LOTS = MIN_VOLUME  # Test with minimum volume
+    # Validate and adjust LOTS (using the already declared global LOTS)
     LOTS = max(MIN_VOLUME, min(LOTS, MAX_VOLUME))
     LOTS = round(round(LOTS / VOLUME_STEP) * VOLUME_STEP, 2)
 

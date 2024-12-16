@@ -102,33 +102,58 @@ def start_trading_bot(symbol, account, password, server):
 
 @app.route('/dashboard')
 def dashboard():
-    # Retrieve the selected symbol from the session
     symbol = session.get('symbol')
     if not symbol:
         return redirect(url_for('select_currency'))
     
     try:
-        # Fetch historical data for the graph
-        data = get_data(symbol, mt5.TIMEFRAME_M1, 100)  # Fetch last 100 data points
+        # Get account info
+        account_info = mt5.account_info()
+        account_balance = account_info.balance if account_info else 0
+        account_equity = account_info.equity if account_info else 0
+        
+        # Get trading status
+        is_trading = True  # You'll need to implement actual trading status check
+        
+        # Calculate active time
+        start_time = session.get('start_time', pd.Timestamp.now())
+        active_time = str(pd.Timestamp.now() - pd.Timestamp(start_time)).split('.')[0]
+        
+        # Get historical data
+        data = get_data(symbol, mt5.TIMEFRAME_M1, 100)
         dates = data['time'].dt.strftime('%Y-%m-%d %H:%M').tolist()
         closes = data['close'].tolist()
+        
+        # Get trade summary
+        trade_summary = get_trade_summary()
+        
+        # Calculate win rate
+        profitable_trades = len([t for t in trade_summary.get('trades', []) if t['profit'] > 0])
+        total_trades = trade_summary['total_trades']
+        win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # Get recent trades (last 10)
+        recent_trades = trade_summary.get('trades', [])[-10:]
+        
+        return render_template(
+            'dashboard.html',
+            symbol=symbol,
+            is_trading=is_trading,
+            account_balance=account_balance,
+            account_equity=account_equity,
+            active_time=active_time,
+            dates=dates,
+            closes=closes,
+            total_profit=trade_summary["total_profit"],
+            total_trades=trade_summary["total_trades"],
+            win_rate=win_rate,
+            trade_actions=trade_summary["trade_actions"],
+            recent_trades=recent_trades
+        )
+        
     except Exception as e:
-        logging.error(f"Error fetching data for dashboard: {e}")
-        dates = []
-        closes = []
-    
-    trade_summary = get_trade_summary()
-    
-    return render_template(
-        'dashboard.html', 
-        dates=dates, 
-        closes=closes, 
-        total_profit=trade_summary["total_profit"],
-        total_trades=trade_summary["total_trades"],
-        trade_actions=trade_summary["trade_actions"],
-        trade_dates=trade_summary["trade_dates"],
-        profits_over_time=trade_summary["profits_over_time"]
-    )
+        logging.error(f"Error in dashboard: {e}")
+        return render_template('dashboard.html', error=str(e))
 
 if __name__ == '__main__':
     app.run(debug=True)
