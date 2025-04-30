@@ -2,7 +2,6 @@ import MetaTrader5 as mt5
 import pandas as pd
 import time
 import logging
-import joblib
 from sklearn.ensemble import RandomForestClassifier
 import json
 import os
