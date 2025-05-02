@@ -1,3 +1,0 @@
-account = 190331763  # Replace with your account number
-    password = "Karthik.413"     # Replace with your password
-    server = "Exness-MT5Trial14"

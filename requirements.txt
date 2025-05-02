@@ -3,3 +3,5 @@ pandas
 joblib
 scikit-learn
 flask
+flask-wtf
+wtforms

@@ -7,6 +7,10 @@ import json
 import os
 import threading
 import numpy as np
+import sys
+import getpass
+from contextlib import contextmanager
+import fcntl  # Only works on Unix, so fallback for Windows below
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,38 +20,57 @@ SYMBOL = "EURUSD"
 TIMEFRAME = mt5.TIMEFRAME_M1  # 1-minute timeframe
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
-LOTS = 0.1
 TRADE_LOG_PATH = 'trade_log.json'
 
+# Use environment variables for credentials
+ACCOUNT = os.getenv('MT5_ACCOUNT')
+PASSWORD = os.getenv('MT5_PASSWORD')
+SERVER = os.getenv('MT5_SERVER')
+
+# File lock context manager for cross-platform
+@contextmanager
+def file_lock(fp):
+    if os.name == 'nt':
+        import msvcrt
+        msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fp, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+
 # Initialize MT5 connection with parameters
-def initialize_mt5(account, password, server):
+def initialize_mt5(account=None, password=None, server=None):
+    account = account or ACCOUNT
+    password = password or PASSWORD
+    server = server or SERVER
+    if not account or not password or not server:
+        logging.critical("MT5 credentials not set. Use environment variables or pass as arguments.")
+        raise Exception("MT5 credentials missing.")
     if not mt5.initialize():
         logging.error("Failed to initialize MT5")
         raise Exception("MT5 initialization failed")
-
     if not mt5.login(int(account), password, server):
         logging.error("Failed to login to MT5 account")
         raise Exception("MT5 login failed")
     else:
         logging.info(f"Successfully logged in to account {account}")
-
-        # Check terminal trade permissions
         terminal_info = mt5.terminal_info()
         if terminal_info is None:
             logging.error("Failed to get terminal info")
             raise Exception("Failed to get terminal info")
-        else:
-            logging.info(f"Terminal Info - Trade Allowed: {terminal_info.trade_allowed}, Trade API Disabled: {terminal_info.tradeapi_disabled}")
-            if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
-                logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading' in the terminal.")
-                raise Exception("Trading not allowed by MetaTrader 5 terminal")
-
-        # Retrieve symbol information to get volume constraints
+        if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
+            logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading' in the terminal.")
+            raise Exception("Trading not allowed by MetaTrader 5 terminal")
         symbol_info = mt5.symbol_info(SYMBOL)
         if symbol_info is None:
             logging.error(f"Symbol {SYMBOL} not found.")
             raise Exception(f"Symbol {SYMBOL} not found.")
-
         global MIN_VOLUME, MAX_VOLUME, VOLUME_STEP
         MIN_VOLUME = symbol_info.volume_min
         MAX_VOLUME = symbol_info.volume_max
@@ -144,18 +167,22 @@ def log_trade(action, symbol, volume, price, profit=0):
         "profit": profit,
         "timestamp": pd.Timestamp.now().isoformat()
     }
+    # Thread-safe file write
     if not os.path.exists(TRADE_LOG_PATH):
-        with open(TRADE_LOG_PATH, 'w') as f:
-            json.dump([trade], f, indent=4)
+        with open(TRADE_LOG_PATH, 'w+') as f:
+            with file_lock(f):
+                json.dump([trade], f, indent=4)
     else:
         with open(TRADE_LOG_PATH, 'r+') as f:
-            try:
-                data = json.load(f)
-            except json.JSONDecodeError:
-                data = []
-            data.append(trade)
-            f.seek(0)
-            json.dump(data, f, indent=4)
+            with file_lock(f):
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = []
+                data.append(trade)
+                f.seek(0)
+                json.dump(data, f, indent=4)
+                f.truncate()
 
 # Update place_trade function to include position sizing
 def place_trade(action, symbol):
@@ -279,23 +306,27 @@ def update_trade_profit():
 
                     # Find the corresponding trade in the log
                     with open(TRADE_LOG_PATH, 'r+') as f:
-                        try:
-                            trades = json.load(f)
-                        except json.JSONDecodeError:
-                            trades = []
-                        for trade in trades:
-                            if trade["action"] == action and trade["symbol"] == symbol and trade["profit"] == 0:
-                                trade["profit"] = profit
-                                break
-                        f.seek(0)
-                        json.dump(trades, f, indent=4)
+                        with file_lock(f):
+                            try:
+                                trades = json.load(f)
+                            except json.JSONDecodeError:
+                                trades = []
+                            for trade in trades:
+                                if trade["action"] == action and trade["symbol"] == symbol and trade["profit"] == 0:
+                                    trade["profit"] = profit
+                                    break
+                            f.seek(0)
+                            json.dump(trades, f, indent=4)
+                            f.truncate()
         except Exception as e:
             logging.error(f"Error updating trade profit: {e}")
         time.sleep(60)  # Check every minute
 
 # Start updating trade profits in a separate thread
 def start_profit_updater():
-    threading.Thread(target=update_trade_profit, daemon=True).start()
+    if not getattr(start_profit_updater, "started", False):
+        threading.Thread(target=update_trade_profit, daemon=True).start()
+        start_profit_updater.started = True
 
 # Handle specific trade errors
 def handle_trade_error(retcode):
@@ -344,9 +375,10 @@ def trading_bot(model, symbol):
 # Run the bot
 if __name__ == "__main__":
     try:
-        account = 190331763  # Replace with your account number
-        password = "Karthik.413"     # Replace with your password
-        server = "Exness-MT5Trial14"    # Replace with your broker's server name
+        # Use environment variables or prompt for credentials
+        account = os.getenv('MT5_ACCOUNT') or input('Enter MT5 account: ')
+        password = os.getenv('MT5_PASSWORD') or getpass.getpass('Enter MT5 password: ')
+        server = os.getenv('MT5_SERVER') or input('Enter MT5 server: ')
         initialize_mt5(account, password, server)
         model = train_model(SYMBOL)  # Train the model and keep it in memory
         trading_bot(model, SYMBOL)     # Pass the trained model to the trading bot
