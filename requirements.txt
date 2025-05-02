@@ -1,4 +1,4 @@
-MetaTrader5
+metatrader5
 pandas
 joblib
 scikit-learn
