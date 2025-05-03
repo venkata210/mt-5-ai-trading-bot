@@ -8,7 +8,6 @@ import pandas as pd
 import logging  # Ensure logging is imported
 from flask_wtf import CSRFProtect
 from wtforms import Form, StringField, PasswordField, validators
-from werkzeug.exceptions import BadRequest
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', os.urandom(32))

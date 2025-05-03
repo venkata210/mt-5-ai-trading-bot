@@ -7,7 +7,6 @@ import json
 import os
 import threading
 import numpy as np
-import sys
 import getpass
 from contextlib import contextmanager
 import fcntl  # Only works on Unix, so fallback for Windows below
