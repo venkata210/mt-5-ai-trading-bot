@@ -16,6 +16,10 @@ CSRFProtect(app)
 # Ensure 'static' folder is correctly set up for serving static files
 app.static_folder = 'static'
 
+# Global bot status tracking
+BOT_STATUS = {}
+BOT_STATUS_LOCK = threading.Lock()
+
 # Path to the trade log file
 TRADE_LOG_PATH = 'trade_log.json'
 
@@ -87,9 +91,9 @@ def login():
                 session['server'] = server
                 session['authenticated'] = True
                 return redirect(url_for('select_currency'))
-        except Exception as e:
-            logging.error(f"Login error: {e}")
-            return render_template('login.html', form=form, error="Login failed. Please check your credentials.")
+        except Exception: # Catching general Exception as MT5 specific exceptions are not well-documented for granular handling here
+            logging.exception("Login error:") # Automatically includes traceback
+            return render_template('login.html', form=form, error="Login failed. Please check your credentials and MT5 connection.")
 
     return render_template('login.html', form=form)
 
@@ -102,7 +106,17 @@ def select_currency():
         symbol = form.symbol.data
         session['symbol'] = symbol
 
-        if 'bot_thread' not in session:
+        with BOT_STATUS_LOCK:
+            if BOT_STATUS.get(symbol) == 'running':
+                # Using flash requires importing it: from flask import flash
+                # For now, just log and redirect, or pass a message to template
+                logging.info(f"Bot for {symbol} is already running.")
+                # flash(f"A trading bot for {symbol} is already running.", "info") # Requires import flash
+                return redirect(url_for('dashboard'))
+
+        # Check session['bot_thread'] to prevent this specific session from starting multiple bots
+        # if not session.get('bot_thread_started_for_symbol', {}).get(symbol): # More granular session tracking
+        if 'bot_thread' not in session: # Simpler session check, assumes one bot per session overall
             # Retrieve credentials from the session
             account = session.get('account')
             server = session.get('server')
@@ -123,13 +137,30 @@ def select_currency():
     return render_template('select_currency.html', form=form)
 
 def start_trading_bot(symbol, account, password, server):
+    with BOT_STATUS_LOCK:
+        BOT_STATUS[symbol] = 'running'
     try:
         if symbol and account and password and server:
-            initialize_mt5(account, password, server)
-            model = train_model(symbol)  # Modify train_model to accept symbol
-            trading_bot(model, symbol)   # Modify trading_bot to accept symbol
-    except Exception as e:
-        logging.error(f"Trading bot error: {e}")
+            initialize_mt5(account, password, server, symbol)
+            model = train_model(symbol)
+            trading_bot(model, symbol)  # This is an infinite loop
+    except Exception: # Catching general Exception as this wraps multiple complex calls from train_model
+        logging.exception(f"Trading bot error for {symbol}:") # Automatically includes traceback
+        with BOT_STATUS_LOCK:
+            BOT_STATUS[symbol] = 'error'
+    finally:
+        # This block will be reached if trading_bot exits (e.g., unhandled exception inside it,
+        # or if it's redesigned to stop) or if initialize_mt5/train_model fails.
+        with BOT_STATUS_LOCK:
+            current_status = BOT_STATUS.get(symbol)
+            if current_status == 'running': # Only mark as stopped if it was 'running' and didn't hit the 'error' state
+                BOT_STATUS[symbol] = 'stopped'
+                logging.info(f"Bot for {symbol} stopped or completed.")
+            elif current_status == 'error':
+                logging.info(f"Bot for {symbol} remains in 'error' state.")
+            else: # e.g. None or 'stopped' already
+                logging.info(f"Bot for {symbol} was already {current_status} or finished initialization in error.")
+
 
 @app.route('/dashboard')
 def dashboard():
@@ -144,7 +175,12 @@ def dashboard():
         account_equity = account_info.equity if account_info else 0
         
         # Get trading status
-        is_trading = bool(session.get('bot_thread'))
+        with BOT_STATUS_LOCK:
+            bot_status_for_symbol = BOT_STATUS.get(symbol) # Get status for the current symbol
+        
+        is_trading = bot_status_for_symbol == 'running'
+        # You can pass bot_status_for_symbol to the template to show 'error', 'stopped' etc.
+        # For example: 'dashboard.html', ..., bot_status=bot_status_for_symbol
         
         # Calculate active time
         start_time = session.get('start_time')
@@ -186,9 +222,15 @@ def dashboard():
             recent_trades=recent_trades
         )
         
-    except Exception as e:
-        logging.error(f"Error in dashboard: {e}")
-        return render_template('dashboard.html', error="An error occurred. Please try again later.")
+    except IOError as e_io: # Specific for file issues in get_trade_summary
+        logging.exception("Dashboard error - file I/O issue:")
+        return render_template('dashboard.html', symbol=symbol, error="Error loading trade summary. Please check logs.")
+    except ValueError as e_val: # Specific for data conversion issues or MT5 data issues
+        logging.exception("Dashboard error - data issue:")
+        return render_template('dashboard.html', symbol=symbol, error="Error processing data for dashboard. Please check logs.")
+    except Exception: # Catch-all for other unexpected errors (e.g. MT5 connection issues)
+        logging.exception("Error in dashboard:") # Automatically includes traceback
+        return render_template('dashboard.html', symbol=symbol, error="An unexpected error occurred on the dashboard. Please check logs.")
 
 if __name__ == '__main__':
     debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
