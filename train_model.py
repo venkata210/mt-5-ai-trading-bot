@@ -14,8 +14,25 @@ import fcntl  # Only works on Unix, so fallback for Windows below
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Custom Exceptions
+class MT5Error(Exception):
+    """Base class for MetaTrader 5 related errors."""
+    pass
+
+class MT5ConnectionError(MT5Error):
+    """Raised for errors during MT5 initialization or login."""
+    pass
+
+class MT5SymbolError(MT5Error, LookupError):
+    """Raised for errors related to symbol not found or selection issues."""
+    pass
+
+class MT5TradeError(MT5Error):
+    """Raised for errors during trade execution if not handled by retcodes."""
+    pass
+
 # Constants
-SYMBOL = "EURUSD"
+DEFAULT_SYMBOL = "EURUSD"  # Default symbol
 TIMEFRAME = mt5.TIMEFRAME_M1  # 1-minute timeframe
 SHORT_MA_PERIOD = 5
 LONG_MA_PERIOD = 20
@@ -44,34 +61,43 @@ def file_lock(fp):
             fcntl.flock(fp, fcntl.LOCK_UN)
 
 # Initialize MT5 connection with parameters
-def initialize_mt5(account=None, password=None, server=None):
+def initialize_mt5(account=None, password=None, server=None, symbol=DEFAULT_SYMBOL):  # Added symbol argument with default
     account = account or ACCOUNT
     password = password or PASSWORD
     server = server or SERVER
     if not account or not password or not server:
-        logging.critical("MT5 credentials not set. Use environment variables or pass as arguments.")
-        raise Exception("MT5 credentials missing.")
+        # Not using logging.critical here as it might be too strong for a library function.
+        # Raising an error is sufficient.
+        raise ValueError("MT5 credentials (account, password, server) are required.")
     if not mt5.initialize():
-        logging.error("Failed to initialize MT5")
-        raise Exception("MT5 initialization failed")
-    if not mt5.login(int(account), password, server):
-        logging.error("Failed to login to MT5 account")
-        raise Exception("MT5 login failed")
-    else:
-        logging.info(f"Successfully logged in to account {account}")
-        terminal_info = mt5.terminal_info()
-        if terminal_info is None:
-            logging.error("Failed to get terminal info")
-            raise Exception("Failed to get terminal info")
-        if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
-            logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading' in the terminal.")
-            raise Exception("Trading not allowed by MetaTrader 5 terminal")
-        symbol_info = mt5.symbol_info(SYMBOL)
-        if symbol_info is None:
-            logging.error(f"Symbol {SYMBOL} not found.")
-            raise Exception(f"Symbol {SYMBOL} not found.")
-        global MIN_VOLUME, MAX_VOLUME, VOLUME_STEP
-        MIN_VOLUME = symbol_info.volume_min
+        # logging.error("Failed to initialize MT5. Last error: %s", mt5.last_error()) # mt5.last_error() might be useful
+        raise MT5ConnectionError(f"Failed to initialize MT5. Last error: {mt5.last_error()}")
+    
+    try: # Attempt login as int first, then try str if that fails (though account is usually int)
+        login_account = int(account)
+    except ValueError:
+        raise ValueError("Account ID must be an integer.")
+
+    if not mt5.login(login_account, password, server):
+        # logging.error("Failed to login to MT5 account %s. Last error: %s", account, mt5.last_error())
+        raise MT5ConnectionError(f"Failed to login to MT5 account {account}. Last error: {mt5.last_error()}")
+    
+    logging.info(f"Successfully logged in to account {account}")
+    terminal_info = mt5.terminal_info()
+    if terminal_info is None:
+        # logging.error("Failed to get terminal info. Last error: %s", mt5.last_error())
+        raise MT5ConnectionError(f"Failed to get terminal info. Last error: {mt5.last_error()}")
+    if not terminal_info.trade_allowed or terminal_info.tradeapi_disabled:
+        # logging.error("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading'.")
+        raise MT5ConnectionError("Trading is not allowed by the MetaTrader 5 terminal. Please enable 'Algo Trading'.")
+    
+    symbol_info = mt5.symbol_info(symbol)
+    if symbol_info is None:
+        # logging.error(f"Symbol {symbol} not found. Last error: %s", mt5.last_error())
+        raise MT5SymbolError(f"Symbol {symbol} not found. Last error: {mt5.last_error()}")
+    
+    global MIN_VOLUME, MAX_VOLUME, VOLUME_STEP
+    MIN_VOLUME = symbol_info.volume_min
         MAX_VOLUME = symbol_info.volume_max
         VOLUME_STEP = symbol_info.volume_step
         logging.info(f"Volume constraints - Min: {MIN_VOLUME}, Max: {MAX_VOLUME}, Step: {VOLUME_STEP}")
@@ -80,12 +106,12 @@ def initialize_mt5(account=None, password=None, server=None):
 def get_data(symbol, timeframe, periods):
     # Ensure the symbol is selected in MetaTrader5
     if not mt5.symbol_select(symbol, True):
-        logging.error(f"Symbol {symbol} not found or could not be selected.")
-        raise Exception(f"Symbol {symbol} not found or could not be selected.")
+        # logging.error(f"Symbol {symbol} not found or could not be selected. Last error: %s", mt5.last_error())
+        raise MT5SymbolError(f"Symbol {symbol} not found or could not be selected. Last error: {mt5.last_error()}")
     rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, periods)
     if rates is None or len(rates) == 0:
-        logging.warning(f"No data received for symbol {symbol}")
-        raise ValueError("Failed to retrieve historical data")
+        # logging.warning will remain, as this is a valid operational state (no data yet) but needs handling.
+        raise ValueError(f"No data received for symbol {symbol} for the specified periods.")
 
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
@@ -101,8 +127,29 @@ def calculate_indicators(data):
     delta = data['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    data['rsi'] = 100 - (100 / (1 + rs))
+
+    # Initialize rsi column
+    data['rsi'] = np.nan
+
+    # Case 1: loss == 0 and gain == 0 (RSI = 50)
+    condition_neutral = (loss == 0) & (gain == 0)
+    data.loc[condition_neutral, 'rsi'] = 50.0
+
+    # Case 2: loss == 0 and gain > 0 (RSI = 100)
+    condition_overbought = (loss == 0) & (gain > 0)
+    data.loc[condition_overbought, 'rsi'] = 100.0
+
+    # Case 3: loss > 0 (normal calculation)
+    # This also covers gain == 0 and loss > 0, resulting in RSI = 0.
+    condition_normal = loss > 0
+    rs_normal = gain[condition_normal] / loss[condition_normal]
+    data.loc[condition_normal, 'rsi'] = 100.0 - (100.0 / (1.0 + rs_normal))
+    
+    # Fill initial NaNs from rolling mean with a neutral 50, or forward fill
+    # data['rsi'] = data['rsi'].fillna(50) # Option 1: fill with 50
+    data['rsi'] = data['rsi'].ffill() # Option 2: forward fill, then backfill for any leading NaNs
+    data['rsi'] = data['rsi'].bfill()
+
 
     # ATR calculation
     high_low = data['high'] - data['low']
@@ -157,14 +204,15 @@ def predict_signal(model, latest_data):
     return "hold"  # Default to hold if conditions aren't met
 
 # Modify the log_trade function to handle profit later
-def log_trade(action, symbol, volume, price, profit=0):
+def log_trade(action, symbol, volume, price, order_ticket, profit=0):  # Added order_ticket
     trade = {
         "action": action,
         "symbol": symbol,
         "volume": volume,
         "price": price,
         "profit": profit,
-        "timestamp": pd.Timestamp.now().isoformat()
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "order_ticket": order_ticket  # Store order_ticket
     }
     # Thread-safe file write
     if not os.path.exists(TRADE_LOG_PATH):
@@ -187,14 +235,15 @@ def log_trade(action, symbol, volume, price, profit=0):
 def place_trade(action, symbol):
     if action == "hold":
         return
+    try:
+        # Get account info for position sizing
+        account_info = mt5.account_info()
+        if account_info is None:
+            logging.error("Failed to get account info for position sizing.") # No traceback needed, it's an expected check
+            # Consider raising MT5ConnectionError if this implies a deeper issue
+            return
 
-    # Get account info for position sizing
-    account_info = mt5.account_info()
-    if account_info is None:
-        logging.error("Failed to get account info")
-        return
-
-    # Calculate position size based on risk percentage (1% risk per trade)
+        # Calculate position size based on risk percentage (1% risk per trade)
     risk_percent = 0.01
     account_balance = account_info.balance
     pip_value = mt5.symbol_info(symbol).point * 10
@@ -204,11 +253,31 @@ def place_trade(action, symbol):
     position_size = risk_amount / (50 * pip_value)
     
     # Adjust to symbol's volume constraints
-    position_size = max(MIN_VOLUME, min(position_size, MAX_VOLUME))
-    position_size = round(round(position_size / VOLUME_STEP) * VOLUME_STEP, 2)
+    # Re-fetch symbol_info for robustness in getting volume constraints
+    symbol_info_local = mt5.symbol_info(symbol)
+    if not symbol_info_local:
+        logging.error(f"Failed to get symbol_info for {symbol} in place_trade for volume constraints")
+        return
+
+    min_vol = symbol_info_local.volume_min
+    max_vol = symbol_info_local.volume_max
+    vol_step = symbol_info_local.volume_step
+
+    # Ensure pip_value is valid, otherwise default or log error
+    if pip_value <= 0:
+        logging.error(f"Invalid pip_value {pip_value} for symbol {symbol}. Cannot calculate position size.")
+        return # Or handle with a default/fallback position size if appropriate
+
+    trade_volume = risk_amount / (50 * pip_value) # Initial calculation based on risk
     
-    global LOTS
-    LOTS = position_size
+    # Adjust to symbol's volume constraints using local variables
+    trade_volume = max(min_vol, min(trade_volume, max_vol))
+    trade_volume = round(round(trade_volume / vol_step) * vol_step, 2) # Ensure precision
+
+    # Ensure trade_volume is not zero or negative after adjustments
+    if trade_volume <= 0:
+        logging.error(f"Calculated trade volume {trade_volume} is invalid for symbol {symbol}.")
+        return
 
     tick = mt5.symbol_info_tick(symbol)
     if tick is None:
@@ -235,10 +304,6 @@ def place_trade(action, symbol):
         logging.error(f"Invalid point size for symbol {symbol}")
         return
 
-    # Validate and adjust LOTS (using the already declared global LOTS)
-    LOTS = max(MIN_VOLUME, min(LOTS, MAX_VOLUME))
-    LOTS = round(round(LOTS / VOLUME_STEP) * VOLUME_STEP, 2)
-
     # Define SL and TP distances in points (pip_distance * point size)
     pip_distance = 50
     if action == "buy":
@@ -252,7 +317,7 @@ def place_trade(action, symbol):
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
-        "volume": LOTS,
+        "volume": trade_volume, # Use the local, processed trade_volume
         "type": mt5.ORDER_TYPE_BUY if action == "buy" else mt5.ORDER_TYPE_SELL,
         "price": price,
         "sl": sl,
@@ -278,47 +343,80 @@ def place_trade(action, symbol):
 
     result = mt5.order_send(request)
     if result.retcode != mt5.TRADE_RETCODE_DONE:
-        logging.error(f"Trade failed, retcode: {result.retcode}")
-        logging.error(f"Trade result: {result}")
-        last_error = mt5.last_error()
-        logging.error(f"MT5 last error: {last_error}")
-        handle_trade_error(result.retcode)
+        # These logs are already specific and helpful. handle_trade_error also logs.
+        # No need for exc_info=True here as it's not an exception path.
+        logging.error(f"Trade failed for {symbol}, retcode: {result.retcode}, result: {result}")
+        last_mt5_error = mt5.last_error()
+        logging.error(f"MT5 last error for failed trade: {last_mt5_error}")
+        handle_trade_error(result.retcode) # This function logs the meaning of the retcode
+        # Optionally, raise MT5TradeError here if you want to propagate it
+        # raise MT5TradeError(f"Trade failed for {symbol} with retcode {result.retcode}. MT5 Error: {last_mt5_error}")
     else:
-        logging.info(f"Trade successful: {result}")
+        logging.info(f"Trade successful for {symbol}: {result}")
+        order_ticket = result.order  # Get order ticket
         # Remove the invalid profit access
         # profit = result.profit
-        log_trade(action, symbol, LOTS, price)
+        log_trade(action, symbol, trade_volume, price, order_ticket) # Pass local trade_volume
         # Note: Profit will be logged when the trade is closed
+    except MT5Error as e_mt5: # Catch specific MT5 errors if they occur unexpectedly
+        logging.exception(f"MT5 error during trade placement for {symbol}:")
+        # Re-raise or handle as appropriate for the bot's logic
+        raise
+    except Exception: # Catch any other unexpected errors
+        logging.exception(f"Unexpected error during trade placement for {symbol}:")
+        # Re-raise or handle
+        raise
+
 
 # Function to update trade profit when a trade is closed
 def update_trade_profit():
     while True:
         try:
-            closed_trades = mt5.history_deals_get()
+            # Potentially, mt5.history_deals_get() could raise an MT5 error if connection is lost.
+            closed_trades = mt5.history_deals_get() 
             if closed_trades is not None:
-                for deal in closed_trades:
-                    # Extract necessary details
-                    order_ticket = deal.order
-                    profit = deal.profit
-                    symbol = deal.symbol
-                    action = "buy" if deal.type == mt5.TRADE_ACTION_DEAL and deal.type_filling == mt5.ORDER_TYPE_BUY else "sell"
-
-                    # Find the corresponding trade in the log
-                    with open(TRADE_LOG_PATH, 'r+') as f:
+                trades_from_log = []
+                try:
+                    with open(TRADE_LOG_PATH, 'r+') as f: # Changed to r+ to allow reading then writing
                         with file_lock(f):
-                            try:
-                                trades = json.load(f)
-                            except json.JSONDecodeError:
-                                trades = []
-                            for trade in trades:
-                                if trade["action"] == action and trade["symbol"] == symbol and trade["profit"] == 0:
-                                    trade["profit"] = profit
-                                    break
-                            f.seek(0)
-                            json.dump(trades, f, indent=4)
-                            f.truncate()
-        except Exception as e:
-            logging.error(f"Error updating trade profit: {e}")
+                            trades_from_log = json.load(f)
+                except FileNotFoundError:
+                    logging.info(f"Trade log file {TRADE_LOG_PATH} not found. Will be created.")
+                    trades_from_log = [] # Ensure it's a list
+                except json.JSONDecodeError:
+                    logging.exception(f"Error decoding JSON from {TRADE_LOG_PATH}. File might be corrupted.")
+                    # Decide on recovery strategy: backup, rename, or skip update cycle
+                    time.sleep(60) # Wait before retrying to avoid rapid logging
+                    continue 
+                except IOError:
+                    logging.exception(f"IOError when accessing {TRADE_LOG_PATH}.")
+                    time.sleep(60)
+                    continue
+
+                needs_update = False
+                for deal in closed_trades:
+                    deal_order_ticket = deal.order
+                    deal_profit = deal.profit
+                    for trade_index, trade in enumerate(trades_from_log):
+                        if trade.get("order_ticket") == deal_order_ticket and trade.get("profit", 0) == 0:
+                            trades_from_log[trade_index]["profit"] = deal_profit
+                            logging.info(f"Updated profit for order ticket {deal_order_ticket} to {deal_profit}")
+                            needs_update = True
+                            break 
+
+                if needs_update:
+                    try:
+                        # Overwriting the file completely. Consider safer approaches for critical data (e.g., temp file then rename)
+                        with open(TRADE_LOG_PATH, 'w') as f: # Changed to 'w' for overwrite
+                            with file_lock(f):
+                                json.dump(trades_from_log, f, indent=4)
+                    except IOError:
+                        logging.exception(f"IOError when writing updated trades to {TRADE_LOG_PATH}.")
+            
+        except MT5Error: # Catch MT5 related errors from history_deals_get()
+            logging.exception("MT5 error during update_trade_profit:")
+        except Exception: # Catch any other unexpected errors
+            logging.exception("Unexpected error in update_trade_profit:")
         time.sleep(60)  # Check every minute
 
 # Start updating trade profits in a separate thread
@@ -366,8 +464,14 @@ def trading_bot(model, symbol):
 
             place_trade(action, symbol)
 
-        except Exception as e:
-            logging.error(f"Error in trading logic: {e}")
+        except MT5Error as e_mt5: # Catch specific MT5 errors that might propagate
+            logging.exception(f"MT5 error in trading_bot main loop for {symbol}:")
+            # Depending on error, might need to attempt re-initialization or stop.
+            # For now, log and continue loop, assuming transient issue.
+        except ValueError as e_val: # E.g., from get_data if no data, or prepare_features
+            logging.exception(f"ValueError in trading_bot main loop for {symbol}:")
+        except Exception: # Catch any other unexpected errors
+            logging.exception(f"Unexpected error in trading_bot main loop for {symbol}:")
 
         time.sleep(60)  # Wait for a minute before checking again
 
@@ -378,13 +482,25 @@ if __name__ == "__main__":
         account = os.getenv('MT5_ACCOUNT') or input('Enter MT5 account: ')
         password = os.getenv('MT5_PASSWORD') or getpass.getpass('Enter MT5 password: ')
         server = os.getenv('MT5_SERVER') or input('Enter MT5 server: ')
-        initialize_mt5(account, password, server)
-        model = train_model(SYMBOL)  # Train the model and keep it in memory
-        trading_bot(model, SYMBOL)     # Pass the trained model to the trading bot
+        initialize_mt5(account, password, server, DEFAULT_SYMBOL)
+        model = train_model(DEFAULT_SYMBOL)
+        trading_bot(model, DEFAULT_SYMBOL)
     except KeyboardInterrupt:
-        logging.info("Stopping trading bot...")
-    except Exception as e:
-        logging.critical(f"Critical error: {e}")
+        logging.info("Trading bot stopped by user (KeyboardInterrupt).")
+    except MT5ConnectionError:
+        logging.exception("Failed to connect or login to MT5 in main execution:")
+    except MT5SymbolError:
+        logging.exception("Symbol related error in main execution:")
+    except ValueError as ve: # Catch ValueErrors from initialize_mt5 (e.g. bad account ID) or get_data
+        logging.exception(f"Configuration or data error in main execution: {ve}")
+    except Exception: # Catch-all for any other unhandled exceptions
+        logging.exception("Critical unhandled error in main execution:")
     finally:
-        mt5.shutdown()
+        logging.info("Shutting down MT5 connection...")
+        if mt5.shutdown():
+            logging.info("MT5 connection shut down successfully.")
+        else:
+            # This might indicate an issue, but often shutdown is called when connection is already lost.
+            # logging.warning("MT5 shutdown reported failure, possibly already disconnected. Last error: %s", mt5.last_error())
+            logging.warning("MT5 shutdown reported failure. Check MT5 terminal logs if issues persist.")
         logging.info("MT5 connection closed")
